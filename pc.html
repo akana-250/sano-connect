@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#071426"><title>SANO CONNECT — Windows Receiver</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#071426;color:#edf5ff;font:16px Arial;padding:20px}.wrap{max-width:900px;margin:auto}h1 span{color:#20a8ee}.panel{background:#10243c;border:1px solid #29425e;border-radius:16px;padding:20px;margin:16px 0}label{display:block;color:#b7c8dc;margin:10px 0 6px}input{width:100%;padding:13px;border-radius:9px;border:1px solid #38516c;background:#07182b;color:white;font-size:17px;letter-spacing:2px}button{border:0;border-radius:9px;background:#078bd1;color:white;font-weight:bold;padding:13px 17px;margin:12px 8px 0 0;font-size:15px}button:disabled{opacity:.45}video{width:100%;background:#000;border-radius:12px;margin-top:12px;max-height:65vh}.status{color:#8bd5ff;white-space:pre-wrap;line-height:1.5}.small{color:#9db1c9;font-size:13px;line-height:1.5}
+</style></head><body><main class="wrap">
+<h1>SANO <span>CONNECT</span> / Windows Receiver</h1><p class="small">Keep this page open on Windows. Enter the same room code used on the iPhone.</p>
+<section class="panel">
+<label for="room">Room code</label><input id="room" maxlength="8" placeholder="e.g. 482915">
+<button id="join">Join room</button><button id="connect" disabled>Start connection</button><button id="stop" disabled>Disconnect</button>
+<p id="status" class="status">Waiting to join.</p>
+<video id="screen" autoplay playsinline controls></video>
+<p class="small">If the picture appears but you hear no sound, click the video controls/unmute and check Windows output volume.</p>
+</section></main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="config.js"></script>
+<script>
+(() => {
+const $=id=>document.getElementById(id);
+let supabase,channel,pc,room,myId=crypto.randomUUID(),phoneId=null,queued=[],remoteStream;
+const cfg=window.SANO_CONFIG||{};
+function status(t){$("status").textContent=t}
+function validConfig(){if(!cfg.SUPABASE_URL||cfg.SUPABASE_URL.includes("PASTE_")||!cfg.SUPABASE_KEY||cfg.SUPABASE_KEY.includes("PASTE_")){status("Setup needed: add your Supabase Project URL and Publishable key in config.js.");return false}return true}
+async function send(to,type,data){await channel.send({type:"broadcast",event:"signal",payload:{from:myId,to,type,data}})}
+async function flush(){for(const c of queued){try{await pc.addIceCandidate(c)}catch(e){console.warn(e)}}queued=[]}
+async function handle(payload){
+ if(!payload)return;
+ if(payload.type==="hello"){phoneId=payload.from;$("connect").disabled=false;status("iPhone found in this room. Press Start connection.");return}
+ if(payload.to!==myId)return;
+ if(payload.type==="answer"){
+  try{await pc.setRemoteDescription(new RTCSessionDescription(payload.data));await flush();status("Connected: receiving iPhone video and audio.")}
+  catch(e){status("Answer error: "+e.message)}
+ }else if(payload.type==="ice"){
+  const c=new RTCIceCandidate(payload.data);
+  if(pc.remoteDescription)try{await pc.addIceCandidate(c)}catch(e){console.warn(e)}
+  else queued.push(c);
+ }else if(payload.type==="bye"){status("iPhone stopped the session.");if(pc)pc.close()}
+}
+$("join").onclick=async()=>{
+ if(!validConfig())return;
+ room=$("room").value.trim();if(!/^[A-Za-z0-9]{4,8}$/.test(room)){status("Enter a room code with 4–8 letters or numbers.");return}
+ $("join").disabled=true;
+ try{
+  supabase=window.supabase.createClient(cfg.SUPABASE_URL,cfg.SUPABASE_KEY);
+  channel=supabase.channel("sano-connect-"+room,{config:{broadcast:{self:false,ack:true},private:false}});
+  channel.on("broadcast",{event:"signal"},({payload})=>handle(payload));
+  channel.subscribe(s=>{if(s==="SUBSCRIBED")status("Joined. Open the iPhone page and press Enable camera & microphone.");else if(s==="CHANNEL_ERROR"||s==="TIMED_OUT")status("Signalling error: "+s)});
+  $("stop").disabled=false;
+ }catch(e){status("Could not join: "+e.message);$("join").disabled=false}
+};
+$("connect").onclick=async()=>{
+ if(!phoneId||!channel)return;
+ $("connect").disabled=true;
+ try{
+  pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}]});
+  remoteStream=new MediaStream();$("screen").srcObject=remoteStream;
+  pc.addTransceiver("video",{direction:"recvonly"});pc.addTransceiver("audio",{direction:"recvonly"});
+  pc.ontrack=e=>{e.streams[0].getTracks().forEach(t=>remoteStream.addTrack(t));$("screen").play().catch(()=>{});status("Receiving iPhone camera and microphone…")};
+  pc.onicecandidate=e=>{if(e.candidate)send(phoneId,"ice",e.candidate.toJSON())};
+  pc.onconnectionstatechange=()=>status("Connection: "+pc.connectionState);
+  const offer=await pc.createOffer();await pc.setLocalDescription(offer);await send(phoneId,"offer",pc.localDescription);
+  status("Offer sent. Waiting for iPhone to answer…");
+ }catch(e){status("Could not start connection: "+e.message);$("connect").disabled=false}
+};
+$("stop").onclick=async()=>{
+ try{if(phoneId&&channel)await send(phoneId,"bye",{});if(pc)pc.close();if(channel)await supabase.removeChannel(channel)}catch(e){}
+ $("screen").srcObject=null;pc=null;channel=null;phoneId=null;queued=[];$("join").disabled=false;$("connect").disabled=true;$("stop").disabled=true;status("Disconnected.");
+};
+})();
+</script></body></html>

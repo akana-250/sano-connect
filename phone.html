@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#071426"><title>SANO CONNECT — iPhone</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#071426;color:#edf5ff;font:16px Arial;padding:20px}.wrap{max-width:760px;margin:auto}h1 span{color:#20a8ee}.panel{background:#10243c;border:1px solid #29425e;border-radius:16px;padding:20px;margin:16px 0}label{display:block;color:#b7c8dc;margin:10px 0 6px}input{width:100%;padding:13px;border-radius:9px;border:1px solid #38516c;background:#07182b;color:white;font-size:17px;letter-spacing:2px}button{border:0;border-radius:9px;background:#078bd1;color:white;font-weight:bold;padding:13px 17px;margin:12px 8px 0 0;font-size:15px}button:disabled{opacity:.45}video{width:100%;background:#000;border-radius:12px;margin-top:12px;max-height:55vh}.status{color:#8bd5ff;white-space:pre-wrap;line-height:1.5}.small{color:#9db1c9;font-size:13px;line-height:1.5}
+</style></head><body><main class="wrap">
+<h1>SANO <span>CONNECT</span> / iPhone</h1><p class="small">Open this page in Safari over HTTPS. Enter the same room code as the Windows receiver.</p>
+<section class="panel">
+<label for="room">Room code</label><input id="room" inputmode="numeric" maxlength="8" placeholder="e.g. 482915">
+<button id="join">Enable camera & microphone</button><button id="stop" disabled>Stop</button>
+<p id="status" class="status">Not connected.</p><video id="preview" autoplay playsinline muted></video>
+<p class="small">Keep this Safari tab open and the iPhone awake during use. Camera/microphone access is requested only after you press the button.</p>
+</section></main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="config.js"></script>
+<script>
+(() => {
+const $=id=>document.getElementById(id);
+let supabase,channel,stream,pc,room,myId=crypto.randomUUID(),pcId=null,queued=[];
+const cfg=window.SANO_CONFIG||{};
+function status(t){$("status").textContent=t}
+function validConfig(){if(!cfg.SUPABASE_URL||cfg.SUPABASE_URL.includes("PASTE_")||!cfg.SUPABASE_KEY||cfg.SUPABASE_KEY.includes("PASTE_")){status("Setup needed: add your Supabase Project URL and Publishable key in config.js.");return false}return true}
+async function send(to,type,data){if(!channel)return;await channel.send({type:"broadcast",event:"signal",payload:{from:myId,to,type,data}})}
+async function flush(){for(const c of queued){try{await pc.addIceCandidate(c)}catch(e){console.warn(e)}}queued=[]}
+async function handle(payload){
+ if(!payload||payload.to!==myId)return;
+ if(payload.type==="offer"){
+  pcId=payload.from;
+  try{
+   await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
+   await flush();
+   const answer=await pc.createAnswer();await pc.setLocalDescription(answer);
+   await send(pcId,"answer",pc.localDescription);
+   status("Connected: sending iPhone camera and microphone to PC.");
+  }catch(e){status("Connection error: "+e.message)}
+ }else if(payload.type==="ice"){
+  const c=new RTCIceCandidate(payload.data);
+  if(pc.remoteDescription)try{await pc.addIceCandidate(c)}catch(e){console.warn(e)}
+  else queued.push(c);
+ }else if(payload.type==="bye"){status("PC ended the session.")}
+}
+$("join").onclick=async()=>{
+ if(!validConfig())return;
+ room=$("room").value.trim();if(!/^[A-Za-z0-9]{4,8}$/.test(room)){status("Enter a room code with 4–8 letters or numbers.");return}
+ $("join").disabled=true;
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1280},height:{ideal:720}},audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+  $("preview").srcObject=stream;
+  supabase=window.supabase.createClient(cfg.SUPABASE_URL,cfg.SUPABASE_KEY);
+  channel=supabase.channel("sano-connect-"+room,{config:{broadcast:{self:false,ack:true},private:false}});
+  channel.on("broadcast",{event:"signal"},({payload})=>handle(payload));
+  channel.subscribe(async s=>{
+   if(s==="SUBSCRIBED"){status("Ready. Now open SANO CONNECT on the PC and press Start connection.");await send("*","hello",{device:"iphone"})}
+   else if(s==="CHANNEL_ERROR"||s==="TIMED_OUT")status("Signalling error: "+s+". Check Supabase settings and internet.");
+  });
+  pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}]});
+  stream.getTracks().forEach(t=>pc.addTrack(t,stream));
+  pc.onicecandidate=e=>{if(e.candidate&&pcId)send(pcId,"ice",e.candidate.toJSON())};
+  pc.onconnectionstatechange=()=>status("Connection: "+pc.connectionState);
+  $("stop").disabled=false;
+ }catch(e){status("Could not start camera/microphone: "+e.message);$("join").disabled=false}
+};
+$("stop").onclick=async()=>{
+ try{if(pcId)await send(pcId,"bye",{});if(pc)pc.close();if(channel)await supabase.removeChannel(channel)}catch(e){}
+ if(stream)stream.getTracks().forEach(t=>t.stop());$("preview").srcObject=null;pc=null;channel=null;stream=null;pcId=null;queued=[];$("join").disabled=false;$("stop").disabled=true;status("Stopped.");
+};
+})();
+</script></body></html>
